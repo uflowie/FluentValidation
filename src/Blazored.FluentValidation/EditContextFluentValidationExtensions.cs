@@ -23,7 +23,7 @@ public static class EditContextFluentValidationExtensions
             async (sender, _) => await ValidateModel((EditContext)sender!, messages, serviceProvider, disableAssemblyScanning, fluentValidationValidator, validator);
 
         editContext.OnFieldChanged +=
-            async (_, eventArgs) => await ValidateField(editContext, messages, eventArgs.FieldIdentifier, serviceProvider, disableAssemblyScanning, validator);
+            (_, eventArgs) => ValidateModelContainingField(editContext, messages, eventArgs.FieldIdentifier, serviceProvider, disableAssemblyScanning, validator);
     }
 
     private static async Task ValidateModel(EditContext editContext,
@@ -67,6 +67,40 @@ public static class EditContextFluentValidationExtensions
         }
     }
 
+    // like ValidateField, but we dont discard the results for other fields in the model containing the fieldidentifier.
+    // this allows us to more gracefully handle the case where changing one field has validation implications for another
+    // field, but perhaps not for the entire graph that the model is a part of
+    private static void ValidateModelContainingField(EditContext editContext,
+        ValidationMessageStore messages,
+        FieldIdentifier fieldIdentifier,
+        IServiceProvider serviceProvider,
+        bool disableAssemblyScanning,
+        IValidator? validator = null)
+    {
+        var properties = new[] { fieldIdentifier.FieldName };
+        var context = new ValidationContext<object>(fieldIdentifier.Model, new PropertyChain(), new MemberNameValidatorSelector(properties));
+
+        validator ??= GetValidatorForModel(serviceProvider, fieldIdentifier.Model, disableAssemblyScanning);
+
+        if (validator is not null)
+        {
+            var validationResults = validator.Validate(context);
+
+            foreach (var validationResult in validationResults.Errors)
+            {
+                var fieldIdentifierForError = ToFieldIdentifier(editContext, validationResult.PropertyName);
+                
+                // make sure we only overwrite the errors for the model containing the field, not the entire graph
+                messages.Clear(fieldIdentifierForError); 
+                
+                messages.Add(fieldIdentifierForError, validationResult.ErrorMessage);
+            }
+
+            editContext.NotifyValidationStateChanged();
+        }
+    }
+
+    /* FOR REFERENCE:
     private static async Task ValidateField(EditContext editContext,
         ValidationMessageStore messages,
         FieldIdentifier fieldIdentifier,
@@ -76,7 +110,7 @@ public static class EditContextFluentValidationExtensions
     {
         var properties = new[] { fieldIdentifier.FieldName };
         var context = new ValidationContext<object>(fieldIdentifier.Model, new PropertyChain(), new MemberNameValidatorSelector(properties));
-            
+
         validator ??= GetValidatorForModel(serviceProvider, fieldIdentifier.Model, disableAssemblyScanning);
 
         if (validator is not null)
@@ -89,6 +123,7 @@ public static class EditContextFluentValidationExtensions
             editContext.NotifyValidationStateChanged();
         }
     }
+    */
 
     private static IValidator? GetValidatorForModel(IServiceProvider serviceProvider, object model, bool disableAssemblyScanning)
     {
@@ -148,7 +183,7 @@ public static class EditContextFluentValidationExtensions
 
         var obj = editContext.Model;
         var nextTokenEnd = propertyPath.IndexOfAny(Separators);
-            
+
         // Optimize for a scenario when parsing isn't needed.
         if (nextTokenEnd < 0)
         {
@@ -175,8 +210,8 @@ public static class EditContextFluentValidationExtensions
                     // we've got an Item property
                     var indexerType = prop.GetIndexParameters()[0].ParameterType;
                     var indexerValue = Convert.ChangeType(nextToken.ToString(), indexerType);
-                        
-                    newObj = prop.GetValue(obj, new [] { indexerValue });
+
+                    newObj = prop.GetValue(obj, new[] { indexerValue });
                 }
                 else
                 {
@@ -211,7 +246,7 @@ public static class EditContextFluentValidationExtensions
             }
 
             obj = newObj;
-                
+
             nextTokenEnd = propertyPathAsSpan.IndexOfAny(Separators);
             if (nextTokenEnd < 0)
             {
